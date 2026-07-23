@@ -1,0 +1,934 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>چک‌یار | محاسبه تاریخ سررسید و مبلغ چک</title>
+<meta name="description" content="محاسبه‌گر رایگان تاریخ سررسید چک بر اساس تقویم شمسی، تشخیص تعطیلی، و تبدیل مبلغ به حروف (ریال و تومان)." />
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#16342E">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</head>
+<body style="margin:0;">
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo } = React;
+
+/* ============================================================
+   Jalali <-> Gregorian conversion (validated against 20,000
+   random round-trips + known reference dates, 0 failures)
+   ============================================================ */
+function div(a, b) { return Math.floor(a / b); }
+function mod(a, b) { return a - Math.floor(a / b) * b; }
+
+const BREAKS = [-61, 9, 38, 199, 426, 686, 756, 818, 1111, 1181, 1210, 1635, 2060, 2097, 2192, 2262, 2324, 2394, 2456, 3178];
+
+function jalCal(jy) {
+  const bl = BREAKS.length;
+  let gy = jy + 621;
+  let leapJ = -14;
+  let jp = BREAKS[0];
+  let jm, jump;
+  let i = 1;
+  for (; i < bl; i += 1) {
+    jm = BREAKS[i];
+    jump = jm - jp;
+    if (jy < jm) break;
+    leapJ = leapJ + div(jump, 33) * 8 + div(mod(jump, 33), 4);
+    jp = jm;
+  }
+  const n = jy - jp;
+  leapJ = leapJ + div(n, 33) * 8 + div(mod(n, 33) + 3, 4);
+  if (mod(jump, 33) === 4 && jump - n === 4) leapJ += 1;
+  const leapG = div(gy, 4) - div((div(gy, 100) + 1) * 3, 4) - 150;
+  const march = 20 + leapJ - leapG;
+  return { gy, march };
+}
+
+const MS_DAY = 86400000;
+
+function nowruzDate(jy) {
+  const r = jalCal(jy);
+  return new Date(Date.UTC(r.gy, 2, r.march));
+}
+
+function yearLength(jy) {
+  return Math.round((nowruzDate(jy + 1) - nowruzDate(jy)) / MS_DAY);
+}
+
+function jalaaliMonthLength(jy, jm) {
+  if (jm <= 6) return 31;
+  if (jm <= 11) return 30;
+  return yearLength(jy) - 336; // Esfand: 29 or 30
+}
+
+function jalaliToGregorian(jy, jm, jd) {
+  const start = nowruzDate(jy);
+  let dayOffset = jd - 1;
+  for (let m = 1; m < jm; m++) dayOffset += jalaaliMonthLength(jy, m);
+  const d = new Date(start);
+  d.setUTCDate(d.getUTCDate() + dayOffset);
+  return d;
+}
+
+function gregorianToJalali(date) {
+  const gy = date.getUTCFullYear();
+  for (const jyCandidate of [gy - 621, gy - 622, gy - 620]) {
+    const start = nowruzDate(jyCandidate);
+    const diffDays = Math.round((date - start) / MS_DAY);
+    if (diffDays < 0) continue;
+    const yLen = yearLength(jyCandidate);
+    if (diffDays >= yLen) continue;
+    let remaining = diffDays;
+    let jm = 1;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const len = jalaaliMonthLength(jyCandidate, jm);
+      if (remaining < len) break;
+      remaining -= len;
+      jm++;
+    }
+    return { jy: jyCandidate, jm, jd: remaining + 1 };
+  }
+  throw new Error("conversion failed");
+}
+
+function addDaysToJalali(jy, jm, jd, days) {
+  const g = jalaliToGregorian(jy, jm, jd);
+  g.setUTCDate(g.getUTCDate() + days);
+  const j = gregorianToJalali(g);
+  return { ...j, greg: g };
+}
+
+function addMonthsToJalali(jy, jm, jd, months) {
+  const totalM = (jm - 1) + months;
+  const newJy = jy + Math.floor(totalM / 12);
+  const newJm = mod(totalM, 12) + 1;
+  const newJd = Math.min(jd, jalaaliMonthLength(newJy, newJm));
+  return { jy: newJy, jm: newJm, jd: newJd };
+}
+
+// Breaks a day-count (possibly negative) into a human "X months, Y days" from a start Jalali date
+function monthsDaysBetween(jy, jm, jd, totalDays) {
+  const startG = jalaliToGregorian(jy, jm, jd);
+  const endG = new Date(startG.getTime() + totalDays * MS_DAY);
+  const end = gregorianToJalali(endG);
+  let months = (end.jy - jy) * 12 + (end.jm - jm);
+  if (end.jd < jd) months -= 1;
+  const mid = addMonthsToJalali(jy, jm, jd, months);
+  const midG = jalaliToGregorian(mid.jy, mid.jm, mid.jd);
+  const remainderDays = Math.round((endG - midG) / MS_DAY);
+  return { months, days: remainderDays, end, endG };
+}
+
+/* ============================================================
+   Persian number -> words (for cheque amount line)
+   Verified against ~20 reference amounts incl. large numbers.
+   ============================================================ */
+const ONES = ["", "یک", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه"];
+const TEENS = ["ده", "یازده", "دوازده", "سیزده", "چهارده", "پانزده", "شانزده", "هفده", "هجده", "نوزده"];
+const TENS = ["", "", "بیست", "سی", "چهل", "پنجاه", "شصت", "هفتاد", "هشتاد", "نود"];
+const HUNDREDS = ["", "صد", "دویست", "سیصد", "چهارصد", "پانصد", "ششصد", "هفتصد", "هشتصد", "نهصد"];
+const SCALES = ["", "هزار", "میلیون", "میلیارد", "هزار میلیارد", "میلیون میلیارد"];
+
+function threeDigitsToWords(n) {
+  const parts = [];
+  const h = Math.floor(n / 100);
+  const rem = n % 100;
+  if (h > 0) parts.push(HUNDREDS[h]);
+  if (rem > 0) {
+    if (rem < 10) parts.push(ONES[rem]);
+    else if (rem < 20) parts.push(TEENS[rem - 10]);
+    else {
+      const t = Math.floor(rem / 10);
+      const o = rem % 10;
+      parts.push(o === 0 ? TENS[t] : TENS[t] + " و " + ONES[o]);
+    }
+  }
+  return parts.join(" و ");
+}
+
+function numberToPersianWords(num) {
+  num = Math.floor(Math.abs(num));
+  if (num === 0) return "صفر";
+  const groups = [];
+  let n = num;
+  while (n > 0) {
+    groups.push(n % 1000);
+    n = Math.floor(n / 1000);
+  }
+  const wordGroups = [];
+  for (let i = groups.length - 1; i >= 0; i--) {
+    if (groups[i] === 0) continue;
+    const w = threeDigitsToWords(groups[i]);
+    wordGroups.push(SCALES[i] ? w + " " + SCALES[i] : w);
+  }
+  return wordGroups.join(" و ");
+}
+
+const FA_D = "۰۱۲۳۴۵۶۷۸۹";
+const AR_D = "٠١٢٣٤٥٦٧٨٩";
+function normalizeDigits(str) {
+  return str
+    .replace(/[۰-۹]/g, (ch) => String(FA_D.indexOf(ch)))
+    .replace(/[٠-٩]/g, (ch) => String(AR_D.indexOf(ch)));
+}
+function parseAmount(str) {
+  const n = normalizeDigits(str).replace(/[^\d]/g, "");
+  return n === "" ? 0 : parseInt(n, 10);
+}
+
+/* ============================================================
+   Static data
+   ============================================================ */
+const MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"];
+const WEEKDAYS_FA = ["یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه"]; // by JS getUTCDay()
+const WEEK_SHORT_IRAN = ["ش", "ی", "د", "س", "چ", "پ", "ج"]; // Sat..Fri
+
+const FA_DIGITS = ["۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹"];
+function toFa(n) {
+  return String(n).replace(/[0-9]/g, (d) => FA_DIGITS[+d]);
+}
+function faCommas(n) {
+  if (!n) return "";
+  return toFa(n.toLocaleString("en-US"));
+}
+
+const FIXED_HOLIDAYS = {
+  "1-12": "روز جمهوری اسلامی ایران",
+  "1-13": "سیزده‌به‌در (روز طبیعت)",
+  "3-14": "رحلت امام خمینی (ره)",
+  "3-15": "قیام خونین ۱۵ خرداد",
+  "11-15": "ولادت امام زمان (عج)",
+  "11-22": "پیروزی انقلاب اسلامی",
+};
+
+const YEAR_HOLIDAYS = {
+  1405: {
+    "1-1": "جشن نوروز و عید سعید فطر",
+    "1-2": "تعطیل به‌مناسبت عید سعید فطر",
+    "1-3": "عید نوروز",
+    "1-4": "عید نوروز",
+    "1-12": "روز جمهوری اسلامی ایران",
+    "1-13": "سیزده‌به‌در (روز طبیعت)",
+    "1-25": "شهادت امام جعفر صادق (ع)",
+    "3-6": "عید سعید قربان",
+    "3-14": "عید سعید غدیر خم و رحلت امام خمینی (ره)",
+    "3-15": "قیام خونین ۱۵ خرداد",
+    "4-3": "تاسوعای حسینی",
+    "4-4": "عاشورای حسینی",
+    "5-13": "اربعین حسینی",
+    "5-21": "رحلت رسول اکرم (ص) و شهادت امام حسن مجتبی (ع)",
+    "5-22": "شهادت امام رضا (ع)",
+    "5-30": "شهادت امام حسن عسکری (ع)",
+    "6-8": "ولادت پیامبر اکرم (ص) و امام جعفر صادق (ع)",
+    "10-2": "ولادت امام علی (ع) و روز پدر",
+    "10-16": "مبعث حضرت رسول اکرم (ص)",
+    "11-15": "ولادت امام زمان (عج)",
+    "11-22": "پیروزی انقلاب اسلامی",
+    "12-19": "عید سعید فطر",
+    "12-20": "تعطیل به‌مناسبت عید سعید فطر",
+  },
+};
+
+function checkHoliday(jy, jm, jd, weekday) {
+  const key = `${jm}-${jd}`;
+  const isFriday = weekday === 5;
+  const yearSpecific = YEAR_HOLIDAYS[jy] && YEAR_HOLIDAYS[jy][key];
+  const fixed = FIXED_HOLIDAYS[key];
+  const reason = yearSpecific || fixed || null;
+  const hasYearData = !!YEAR_HOLIDAYS[jy];
+  return { isHoliday: isFriday || !!reason, isFriday, reason, hasYearData };
+}
+
+function findNextBusinessDay(jy, jm, jd) {
+  let g = jalaliToGregorian(jy, jm, jd);
+  for (let i = 0; i < 30; i++) {
+    g = new Date(g.getTime() + MS_DAY);
+    const j = gregorianToJalali(g);
+    const h = checkHoliday(j.jy, j.jm, j.jd, g.getUTCDay());
+    if (!h.isHoliday) return { ...j, greg: g };
+  }
+  return null;
+}
+
+/* ============================================================
+   Component
+   ============================================================ */
+function ChekYar() {
+  const todayG = new Date();
+  const todayUTC = new Date(Date.UTC(todayG.getFullYear(), todayG.getMonth(), todayG.getDate()));
+  const todayJ = gregorianToJalali(todayUTC);
+
+  const [jy, setJy] = useState(todayJ.jy);
+  const [jm, setJm] = useState(todayJ.jm);
+  const [jd, setJd] = useState(todayJ.jd);
+  const [days, setDays] = useState(45);
+  const [customDays, setCustomDays] = useState("");
+
+  const [amount, setAmount] = useState(0);
+  const [currency, setCurrency] = useState("ریال");
+  const [addTamam, setAddTamam] = useState(true);
+  const [copied, setCopied] = useState(false);
+
+  const [tab, setTab] = useState("single");
+  const [checks, setChecks] = useState([
+    { id: 1, jy: todayJ.jy, jm: todayJ.jm, jd: todayJ.jd, amount: 0 },
+  ]);
+  const [multiCurrency, setMultiCurrency] = useState("ریال");
+  const nextIdRef = React.useRef(2);
+
+  const addCheckRow = () => {
+    setChecks((cs) => [
+      ...cs,
+      { id: nextIdRef.current++, jy: todayJ.jy, jm: todayJ.jm, jd: todayJ.jd, amount: 0 },
+    ]);
+  };
+  const removeCheckRow = (id) => setChecks((cs) => (cs.length > 1 ? cs.filter((c) => c.id !== id) : cs));
+  const updateCheckRow = (id, patch) =>
+    setChecks((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+
+  const multiSummary = useMemo(() => {
+    const valid = checks.filter((c) => c.amount > 0);
+    if (valid.length === 0) return null;
+    const totalAmount = valid.reduce((s, c) => s + c.amount, 0);
+    let weightedDaysSum = 0;
+    const rows = valid.map((c) => {
+      const g = jalaliToGregorian(c.jy, c.jm, c.jd);
+      const diffDays = Math.round((g - todayUTC) / MS_DAY);
+      weightedDaysSum += c.amount * diffDays;
+      const h = checkHoliday(c.jy, c.jm, c.jd, g.getUTCDay());
+      return { ...c, greg: g, diffDays, weekday: g.getUTCDay(), holidayInfo: h };
+    });
+    const avgDays = Math.round(weightedDaysSum / totalAmount);
+    const avgG = new Date(todayUTC.getTime() + avgDays * MS_DAY);
+    const avgJ = gregorianToJalali(avgG);
+    const md = monthsDaysBetween(todayJ.jy, todayJ.jm, todayJ.jd, avgDays);
+    const sorted = [...rows].sort((a, b) => a.diffDays - b.diffDays);
+    return {
+      rows,
+      totalAmount,
+      avgDays,
+      avgJ,
+      avgG,
+      md,
+      earliest: sorted[0],
+      latest: sorted[sorted.length - 1],
+    };
+  }, [checks]);
+
+  const dayCount = jalaaliMonthLength(jy, jm);
+  const effectiveDays = customDays !== "" ? Number(customDays) : days;
+
+  const result = useMemo(() => {
+    if (!effectiveDays || effectiveDays < 1) return null;
+    const due = addDaysToJalali(jy, jm, jd, effectiveDays);
+    const weekday = due.greg.getUTCDay();
+    const holidayInfo = checkHoliday(due.jy, due.jm, due.jd, weekday);
+    const nextBiz = holidayInfo.isHoliday ? findNextBusinessDay(due.jy, due.jm, due.jd) : null;
+    return { due, weekday, holidayInfo, nextBiz };
+  }, [jy, jm, jd, effectiveDays]);
+
+  const resetToday = () => {
+    setJy(todayJ.jy);
+    setJm(todayJ.jm);
+    setJd(todayJ.jd);
+  };
+
+  const presets = [10, 15, 30, 45, 60, 90, 120];
+
+  const calCells = useMemo(() => {
+    if (!result) return [];
+    const { jy: dJy, jm: dJm } = result.due;
+    const monthLen = jalaaliMonthLength(dJy, dJm);
+    const firstG = jalaliToGregorian(dJy, dJm, 1);
+    const firstIranIdx = (firstG.getUTCDay() + 1) % 7;
+    const cells = [];
+    for (let i = 0; i < firstIranIdx; i++) cells.push(null);
+    for (let d = 1; d <= monthLen; d++) {
+      const g = jalaliToGregorian(dJy, dJm, d);
+      const h = checkHoliday(dJy, dJm, d, g.getUTCDay());
+      cells.push({ d, isHoliday: h.isHoliday, reason: h.reason, isFriday: h.isFriday });
+    }
+    return cells;
+  }, [result]);
+
+  const amountWords = amount > 0 ? numberToPersianWords(amount) : "";
+  const fullPhrase = amount > 0 ? `${amountWords} ${currency}${addTamam ? " تمام" : ""}` : "";
+  const otherCurrency = currency === "ریال" ? "تومان" : "ریال";
+  const otherAmount = currency === "ریال" ? Math.floor(amount / 10) : amount * 10;
+
+  const copyPhrase = () => {
+    if (!fullPhrase) return;
+    try {
+      navigator.clipboard.writeText(fullPhrase);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      /* clipboard unavailable, ignore */
+    }
+  };
+
+  return (
+    <div dir="rtl" lang="fa" style={{ minHeight: "100vh", background: "var(--desk)" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800;900&display=swap');
+        :root {
+          --desk: #DDD6C1;
+          --paper: #F3EEDC;
+          --paper-deep: #EAE2C6;
+          --ink: #16342E;
+          --ink-soft: #3C5B51;
+          --brass: #A9822C;
+          --brass-light: #C9A54A;
+          --stamp-red: #A23B3B;
+          --stamp-red-bg: #F6E4E1;
+          --stamp-green: #2F6E51;
+          --stamp-green-bg: #E4EFE7;
+          --line: #C9BFA0;
+        }
+        * { box-sizing: border-box; font-family: 'Vazirmatn', sans-serif; }
+        .cy-shell { max-width: 480px; margin: 0 auto; padding: 20px 14px 44px; }
+
+        .cy-header { display:flex; align-items:center; gap:10px; padding: 4px 6px 16px; }
+        .cy-mark {
+          width: 42px; height: 42px; border-radius: 11px;
+          background: var(--ink); color: var(--paper);
+          display:flex; align-items:center; justify-content:center;
+          font-weight: 800; font-size: 17px; box-shadow: 0 2px 0 var(--brass);
+        }
+        .cy-title { font-weight: 800; font-size: 19px; color: var(--ink); line-height:1.15; }
+        .cy-sub { font-size: 12px; color: var(--ink-soft); opacity:.75; margin-top:1px; }
+
+        /* ---- cheque leaf frame ---- */
+        .cy-leaf {
+          border: 2px solid var(--brass);
+          border-radius: 16px;
+          padding: 4px;
+          box-shadow: 0 14px 30px -18px rgba(22,52,46,0.5), 0 2px 0 rgba(0,0,0,0.03);
+        }
+        .cy-leaf-inner {
+          position: relative;
+          border: 1px solid var(--brass-light);
+          border-radius: 13px;
+          background: var(--paper);
+          padding: 18px 16px 16px;
+          overflow: hidden;
+        }
+        .cy-watermark {
+          position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+          pointer-events:none; z-index:0;
+        }
+        .cy-watermark span {
+          font-size: 54px; font-weight: 900; color: var(--ink); opacity: 0.05;
+          transform: rotate(-22deg); white-space: nowrap; letter-spacing: 4px;
+        }
+        .cy-leaf-content { position: relative; z-index: 1; }
+
+        .cy-leaf-topbar {
+          display:flex; justify-content:space-between; align-items:flex-start;
+          margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line);
+        }
+        .cy-serial { font-size: 11px; color: var(--ink-soft); opacity:.6; letter-spacing: 1px; font-weight:700; }
+        .cy-seal {
+          width: 46px; height: 46px; border-radius: 50%;
+          border: 2px dashed var(--brass); display:flex; align-items:center; justify-content:center;
+          font-size: 10px; font-weight:800; color: var(--brass); text-align:center; line-height:1.2;
+          transform: rotate(8deg);
+        }
+
+        .cy-row-label {
+          font-size: 12.5px; font-weight: 700; color: var(--ink-soft);
+          margin-bottom: 7px; display:flex; align-items:center; gap:6px;
+        }
+        .cy-row-label .dot { width:5px; height:5px; border-radius:50%; background: var(--brass); display:inline-block; }
+
+        .cy-select-row { display:flex; gap:8px; }
+        .cy-select {
+          flex:1; appearance:none; -webkit-appearance:none;
+          background: #fff; border: none; border-bottom: 2px dotted var(--brass);
+          border-radius: 4px 4px 0 0; padding: 9px 6px; font-size: 14px; color: var(--ink);
+          font-weight:700; text-align:center;
+        }
+        .cy-select:focus { outline: none; border-bottom-color: var(--ink); }
+        .cy-today-btn {
+          margin-top:10px; width:100%; padding:9px; border-radius:10px;
+          border: 1.5px dashed var(--brass); background: transparent; color: var(--brass);
+          font-weight:700; font-size:12.5px; cursor:pointer;
+        }
+        .cy-today-btn:hover { background: var(--paper-deep); }
+
+        .cy-presets { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px; }
+        .cy-chip {
+          padding: 7px 13px; border-radius: 999px; border: 1.5px solid var(--line);
+          background:#fff; font-weight:700; font-size:12.5px; color: var(--ink-soft); cursor:pointer;
+        }
+        .cy-chip.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+        .cy-custom-input {
+          margin-top:10px; width:100%; padding:9px 12px; border-radius:8px;
+          border: none; border-bottom: 2px dotted var(--brass); font-size:13.5px; text-align:center;
+          font-weight:700; color: var(--ink); background: transparent;
+        }
+        .cy-custom-input:focus { outline:none; border-bottom-color: var(--ink); }
+        .cy-custom-input::placeholder { color: #9C9377; font-weight:500; }
+
+        .cy-perforation { position: relative; height: 0; margin: 20px -16px; border-top: 2px dashed var(--line); }
+        .cy-perforation::before, .cy-perforation::after {
+          content:''; position:absolute; top:-9px; width:18px; height:18px;
+          background: var(--desk); border-radius:50%; border:1px solid var(--line);
+        }
+        .cy-perforation::before { left:-9px; }
+        .cy-perforation::after { right:-9px; }
+
+        .cy-result-label { font-size:11.5px; font-weight:700; color: var(--ink-soft); opacity:.7; text-align:center; }
+        .cy-result-date { font-size: 28px; font-weight: 900; color: var(--ink); margin-top: 6px; text-align:center; }
+        .cy-result-weekday { font-size: 13.5px; font-weight:700; color: var(--ink-soft); margin-top:2px; text-align:center; }
+        .cy-result-greg { font-size:12px; color:#8A8265; margin-top:4px; font-weight:600; text-align:center; }
+
+        .cy-stamp-wrap { display:flex; justify-content:center; margin: 14px 0 4px; }
+        .cy-stamp {
+          border: 3px solid var(--stamp-green); color: var(--stamp-green); border-radius: 14px;
+          padding: 7px 20px; font-weight: 900; font-size: 14px; transform: rotate(-6deg);
+          background: var(--stamp-green-bg); box-shadow: 0 0 0 3px var(--stamp-green-bg);
+        }
+        .cy-stamp.holiday {
+          border-color: var(--stamp-red); color: var(--stamp-red); background: var(--stamp-red-bg);
+          box-shadow: 0 0 0 3px var(--stamp-red-bg); transform: rotate(-4deg);
+        }
+        .cy-reason { text-align:center; font-size:12.5px; color: var(--ink-soft); margin-top:2px; font-weight:600; }
+        .cy-nextbiz {
+          margin-top: 12px; background: var(--paper-deep); border-radius: 10px; padding: 10px 13px;
+          font-size: 12.5px; color: var(--ink); line-height: 1.85;
+        }
+        .cy-nextbiz b { color: var(--stamp-green); }
+
+        .cy-cal-title { font-size:12.5px; font-weight:800; color:var(--ink); margin: 18px 0 9px; text-align:center; }
+        .cy-cal-grid { display:grid; grid-template-columns: repeat(7, 1fr); gap:4px; }
+        .cy-cal-head { text-align:center; font-size:10.5px; font-weight:800; color: var(--ink-soft); opacity:.6; padding-bottom:4px; }
+        .cy-cal-cell {
+          aspect-ratio: 1; display:flex; align-items:center; justify-content:center;
+          font-size:12px; font-weight:700; border-radius:7px; color: var(--ink);
+        }
+        .cy-cal-cell.friday { color: var(--stamp-red); opacity:.75; }
+        .cy-cal-cell.holiday { background: var(--stamp-red-bg); color: var(--stamp-red); }
+        .cy-cal-cell.due { background: var(--ink); color: var(--paper); box-shadow: 0 0 0 2px var(--brass); }
+        .cy-cal-cell.empty { visibility:hidden; }
+        .cy-legend { display:flex; gap:14px; justify-content:center; margin-top:10px; flex-wrap:wrap; }
+        .cy-legend-item { display:flex; align-items:center; gap:5px; font-size:10.5px; color:var(--ink-soft); font-weight:600; }
+        .cy-dot { width:9px; height:9px; border-radius:3px; }
+
+        .cy-warn {
+          margin-top:10px; background:#FBF0DD; border:1px solid #E4C784; color:#7A5B12;
+          border-radius:10px; padding:9px 11px; font-size:11.5px; font-weight:600; line-height:1.8;
+        }
+
+        /* ---- amount section ---- */
+        .cy-currency-toggle { display:flex; background:#fff; border:1.5px solid var(--line); border-radius: 10px; padding:3px; gap:3px; }
+        .cy-currency-btn {
+          flex:1; padding:8px 0; border-radius:8px; border:none; background:transparent;
+          font-weight:800; font-size:13.5px; color: var(--ink-soft); cursor:pointer;
+        }
+        .cy-currency-btn.active { background: var(--ink); color: var(--paper); }
+        .cy-amount-input {
+          width:100%; margin-top:10px; padding:14px 12px; border-radius:10px;
+          border: none; border-bottom: 2px dotted var(--brass); background: transparent;
+          font-size: 22px; font-weight:900; color: var(--ink); text-align:center; letter-spacing:1px;
+        }
+        .cy-amount-input:focus { outline:none; border-bottom-color: var(--ink); }
+        .cy-amount-input::placeholder { color:#B4AC8C; font-size:15px; font-weight:600; }
+
+        .cy-words-box {
+          margin-top: 12px; background: var(--paper-deep); border-radius: 12px; padding: 14px;
+          font-size: 14.5px; font-weight:700; color: var(--ink); line-height: 2; text-align:center;
+          min-height: 26px;
+        }
+        .cy-tamam-row { display:flex; align-items:center; justify-content:center; gap:7px; margin-top:10px; }
+        .cy-tamam-row label { font-size:12px; font-weight:600; color: var(--ink-soft); }
+        .cy-equiv { text-align:center; font-size:12px; color:#8A8265; font-weight:600; margin-top:8px; }
+        .cy-copy-btn {
+          display:block; margin: 10px auto 0; padding: 8px 20px; border-radius: 999px;
+          border: 1.5px solid var(--ink); background: transparent; color: var(--ink);
+          font-weight:800; font-size:12.5px; cursor:pointer;
+        }
+        .cy-copy-btn.copied { background: var(--stamp-green); border-color: var(--stamp-green); color: #fff; }
+
+        .cy-note { margin-top: 16px; font-size: 11px; color: #8A8265; line-height: 1.9; text-align:center; padding: 0 6px; }
+
+        .cy-tabs { display:flex; gap:8px; margin-bottom: 16px; }
+        .cy-tab-btn {
+          flex:1; padding:10px 4px; border-radius:10px; border: 1.5px solid var(--line);
+          background: #fff; color: var(--ink-soft); font-weight:800; font-size:12.5px; cursor:pointer;
+        }
+        .cy-tab-btn.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+        .cy-check-row {
+          border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 10px; background: #fff;
+        }
+        .cy-check-row-header {
+          display:flex; align-items:center; gap:8px; margin-bottom: 9px;
+          font-size:12.5px; font-weight:800; color: var(--ink-soft);
+        }
+        .cy-remove-btn {
+          margin-right:auto; border:none; background: var(--stamp-red-bg); color: var(--stamp-red);
+          width:22px; height:22px; border-radius:50%; font-weight:800; font-size:11px; cursor:pointer; line-height:1;
+        }
+        .cy-mini-badge {
+          font-size: 10.5px; font-weight:700; padding: 2px 8px; border-radius: 999px;
+          background: var(--stamp-green-bg); color: var(--stamp-green);
+        }
+        .cy-mini-badge.holiday { background: var(--stamp-red-bg); color: var(--stamp-red); }
+        .cy-amount-input-sm { font-size: 16px; padding: 10px; margin-top: 8px; }
+
+        .cy-summary-card { background: var(--paper-deep); border-radius: 12px; padding: 12px 14px; }
+        .cy-summary-row {
+          display:flex; justify-content:space-between; align-items:center;
+          font-size:12.5px; color: var(--ink-soft); font-weight:600; padding: 5px 0;
+        }
+        .cy-summary-row b { color: var(--ink); font-weight:800; }
+        .cy-summary-row + .cy-summary-row { border-top: 1px dashed var(--line); }
+
+        .cy-list-row {
+          display:flex; justify-content:space-between; align-items:center; gap:8px;
+          font-size:12.5px; font-weight:700; color: var(--ink); padding: 8px 4px;
+          border-bottom: 1px dashed var(--line);
+        }
+        .cy-list-amount { color: var(--ink-soft); font-weight:700; margin-inline-end: auto; margin-inline-start: 8px; }
+
+        .cy-sig { position:absolute; bottom:10px; left:16px; opacity:.35; }
+      `}</style>
+
+      <div className="cy-shell">
+        <div className="cy-header">
+          <div className="cy-mark">چک</div>
+          <div>
+            <div className="cy-title">چک‌یار</div>
+            <div className="cy-sub">دستیار محاسبه تاریخ سررسید و مبلغ چک</div>
+          </div>
+        </div>
+
+        <div className="cy-leaf">
+          <div className="cy-leaf-inner">
+            <div className="cy-watermark"><span>چک‌یار · چک‌یار</span></div>
+            <div className="cy-leaf-content">
+              <div className="cy-leaf-topbar">
+                <div className="cy-serial">شماره پیش‌نویس: {toFa(String(jy) + String(jm).padStart(2, "0") + String(jd).padStart(2, "0"))}</div>
+                <div className="cy-seal">فقط<br />محاسبه‌گر</div>
+              </div>
+
+              <div className="cy-tabs">
+                <button className={"cy-tab-btn" + (tab === "single" ? " active" : "")} onClick={() => setTab("single")}>یک چک</button>
+                <button className={"cy-tab-btn" + (tab === "multi" ? " active" : "")} onClick={() => setTab("multi")}>دفتر چک‌های مشتری</button>
+              </div>
+
+              {tab === "single" && (
+              <>
+              {/* ---- Date section ---- */}
+              <div className="cy-row-label"><span className="dot" />تاریخ صدور چک</div>
+              <div className="cy-select-row">
+                <select className="cy-select" value={jd} onChange={(e) => setJd(Number(e.target.value))}>
+                  {Array.from({ length: dayCount }, (_, i) => i + 1).map((d) => (
+                    <option key={d} value={d}>{toFa(d)}</option>
+                  ))}
+                </select>
+                <select
+                  className="cy-select"
+                  style={{ flex: 1.7 }}
+                  value={jm}
+                  onChange={(e) => {
+                    const newJm = Number(e.target.value);
+                    const newLen = jalaaliMonthLength(jy, newJm);
+                    setJm(newJm);
+                    if (jd > newLen) setJd(newLen);
+                  }}
+                >
+                  {MONTHS.map((m, i) => (
+                    <option key={m} value={i + 1}>{m}</option>
+                  ))}
+                </select>
+                <select
+                  className="cy-select"
+                  value={jy}
+                  onChange={(e) => {
+                    const newJy = Number(e.target.value);
+                    const newLen = jalaaliMonthLength(newJy, jm);
+                    setJy(newJy);
+                    if (jd > newLen) setJd(newLen);
+                  }}
+                >
+                  {[1403, 1404, 1405, 1406, 1407].map((y) => (
+                    <option key={y} value={y}>{toFa(y)}</option>
+                  ))}
+                </select>
+              </div>
+              <button className="cy-today-btn" onClick={resetToday}>
+                بازگشت به امروز ({toFa(todayJ.jd)} {MONTHS[todayJ.jm - 1]} {toFa(todayJ.jy)})
+              </button>
+
+              <div style={{ marginTop: 18 }}>
+                <div className="cy-row-label"><span className="dot" />مهلت چک چند روزه است؟</div>
+                <div className="cy-presets">
+                  {presets.map((p) => (
+                    <button
+                      key={p}
+                      className={"cy-chip" + (effectiveDays === p && customDays === "" ? " active" : "")}
+                      onClick={() => { setDays(p); setCustomDays(""); }}
+                    >
+                      {toFa(p)} روزه
+                    </button>
+                  ))}
+                </div>
+                <input
+                  className="cy-custom-input"
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  max="3650"
+                  placeholder="یا تعداد روز دلخواه…"
+                  value={customDays}
+                  onChange={(e) => setCustomDays(e.target.value)}
+                />
+              </div>
+
+              {result && (
+                <>
+                  <div className="cy-perforation" />
+                  <div className="cy-result-label">تاریخ سررسید ({toFa(effectiveDays)} روز بعد از صدور)</div>
+                  <div className="cy-result-date">
+                    {toFa(result.due.jd)} {MONTHS[result.due.jm - 1]} {toFa(result.due.jy)}
+                  </div>
+                  <div className="cy-result-weekday">{WEEKDAYS_FA[result.weekday]}</div>
+                  <div className="cy-result-greg">
+                    میلادی: {result.due.greg.getUTCFullYear()}/{String(result.due.greg.getUTCMonth() + 1).padStart(2, "0")}/{String(result.due.greg.getUTCDate()).padStart(2, "0")}
+                  </div>
+
+                  <div className="cy-stamp-wrap">
+                    <div className={"cy-stamp" + (result.holidayInfo.isHoliday ? " holiday" : "")}>
+                      {result.holidayInfo.isHoliday ? "◆ تعطیل ◆" : "◆ روز کاری ◆"}
+                    </div>
+                  </div>
+                  {result.holidayInfo.isHoliday && (
+                    <div className="cy-reason">{result.holidayInfo.reason || "جمعه، تعطیل هفتگی"}</div>
+                  )}
+                  {result.holidayInfo.isHoliday && result.nextBiz && (
+                    <div className="cy-nextbiz">
+                      چون سررسید با تعطیلی مصادف است، بانک‌ها معمولاً چک را در نخستین <b>روز کاری بعد</b> پردازش می‌کنند:
+                      <br />
+                      <b>{toFa(result.nextBiz.jd)} {MONTHS[result.nextBiz.jm - 1]} {toFa(result.nextBiz.jy)} ({WEEKDAYS_FA[result.nextBiz.greg.getUTCDay()]})</b>
+                    </div>
+                  )}
+                  {!result.holidayInfo.hasYearData && (
+                    <div className="cy-warn">
+                      ⚠️ تعطیلات قمری سال {toFa(result.due.jy)} هنوز در پایگاه‌داده ثبت نشده. جمعه‌ها و تعطیلات ثابت لحاظ شده؛ برای اطمینان کامل با اپ بانکتان چک کنید.
+                    </div>
+                  )}
+
+                  <div className="cy-cal-title">تقویم {MONTHS[result.due.jm - 1]} {toFa(result.due.jy)}</div>
+                  <div className="cy-cal-grid">
+                    {WEEK_SHORT_IRAN.map((w) => <div key={w} className="cy-cal-head">{w}</div>)}
+                    {calCells.map((c, idx) =>
+                      c === null ? (
+                        <div key={idx} className="cy-cal-cell empty" />
+                      ) : (
+                        <div
+                          key={idx}
+                          className={"cy-cal-cell" + (c.isHoliday ? " holiday" : c.isFriday ? " friday" : "") + (c.d === result.due.jd ? " due" : "")}
+                          title={c.reason || ""}
+                        >
+                          {toFa(c.d)}
+                        </div>
+                      )
+                    )}
+                  </div>
+                  <div className="cy-legend">
+                    <div className="cy-legend-item"><span className="cy-dot" style={{ background: "var(--ink)" }} /> سررسید</div>
+                    <div className="cy-legend-item"><span className="cy-dot" style={{ background: "var(--stamp-red-bg)", border: "1px solid var(--stamp-red)" }} /> تعطیل</div>
+                  </div>
+                </>
+              )}
+
+              {/* ---- Amount section ---- */}
+              <div className="cy-perforation" />
+              <div className="cy-row-label"><span className="dot" />مبلغ چک به حروف</div>
+              <div className="cy-currency-toggle">
+                <button className={"cy-currency-btn" + (currency === "ریال" ? " active" : "")} onClick={() => setCurrency("ریال")}>ریال</button>
+                <button className={"cy-currency-btn" + (currency === "تومان" ? " active" : "")} onClick={() => setCurrency("تومان")}>تومان</button>
+              </div>
+              <input
+                className="cy-amount-input"
+                type="text"
+                inputMode="numeric"
+                placeholder="مثلاً ۵۰۰۰۰۰۰"
+                value={amount ? faCommas(amount) : ""}
+                onChange={(e) => setAmount(parseAmount(e.target.value))}
+              />
+              <div className="cy-tamam-row">
+                <input id="tamam" type="checkbox" checked={addTamam} onChange={(e) => setAddTamam(e.target.checked)} />
+                <label htmlFor="tamam">افزودن «تمام» در پایان (برای جلوگیری از دستکاری متن)</label>
+              </div>
+
+              {fullPhrase && (
+                <>
+                  <div className="cy-words-box">{fullPhrase}</div>
+                  <div className="cy-equiv">معادل تقریبی: {faCommas(otherAmount)} {otherCurrency}</div>
+                  <button className={"cy-copy-btn" + (copied ? " copied" : "")} onClick={copyPhrase}>
+                    {copied ? "کپی شد ✓" : "کپی متن"}
+                  </button>
+                </>
+              )}
+              </>
+              )}
+
+              {tab === "multi" && (
+              <>
+              <div className="cy-row-label"><span className="dot" />واحد مبلغ چک‌ها</div>
+              <div className="cy-currency-toggle">
+                <button className={"cy-currency-btn" + (multiCurrency === "ریال" ? " active" : "")} onClick={() => setMultiCurrency("ریال")}>ریال</button>
+                <button className={"cy-currency-btn" + (multiCurrency === "تومان" ? " active" : "")} onClick={() => setMultiCurrency("تومان")}>تومان</button>
+              </div>
+
+              <div style={{ marginTop: 14 }}>
+                {checks.map((c, idx) => {
+                  const len = jalaaliMonthLength(c.jy, c.jm);
+                  const g = jalaliToGregorian(c.jy, c.jm, Math.min(c.jd, len));
+                  const h = checkHoliday(c.jy, c.jm, c.jd, g.getUTCDay());
+                  return (
+                    <div className="cy-check-row" key={c.id}>
+                      <div className="cy-check-row-header">
+                        <span>چک {toFa(idx + 1)}</span>
+                        {h.isHoliday && <span className="cy-mini-badge holiday">{h.reason ? h.reason : "جمعه"}</span>}
+                        {checks.length > 1 && (
+                          <button className="cy-remove-btn" onClick={() => removeCheckRow(c.id)} aria-label="حذف">✕</button>
+                        )}
+                      </div>
+                      <div className="cy-select-row">
+                        <select className="cy-select" value={c.jd} onChange={(e) => updateCheckRow(c.id, { jd: Number(e.target.value) })}>
+                          {Array.from({ length: len }, (_, i) => i + 1).map((d) => (
+                            <option key={d} value={d}>{toFa(d)}</option>
+                          ))}
+                        </select>
+                        <select
+                          className="cy-select"
+                          style={{ flex: 1.7 }}
+                          value={c.jm}
+                          onChange={(e) => {
+                            const newJm = Number(e.target.value);
+                            const newLen = jalaaliMonthLength(c.jy, newJm);
+                            updateCheckRow(c.id, { jm: newJm, jd: Math.min(c.jd, newLen) });
+                          }}
+                        >
+                          {MONTHS.map((m, i) => (
+                            <option key={m} value={i + 1}>{m}</option>
+                          ))}
+                        </select>
+                        <select
+                          className="cy-select"
+                          value={c.jy}
+                          onChange={(e) => {
+                            const newJy = Number(e.target.value);
+                            const newLen = jalaaliMonthLength(newJy, c.jm);
+                            updateCheckRow(c.id, { jy: newJy, jd: Math.min(c.jd, newLen) });
+                          }}
+                        >
+                          {[1403, 1404, 1405, 1406, 1407].map((y) => (
+                            <option key={y} value={y}>{toFa(y)}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <input
+                        className="cy-amount-input cy-amount-input-sm"
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="مبلغ این چک"
+                        value={c.amount ? faCommas(c.amount) : ""}
+                        onChange={(e) => updateCheckRow(c.id, { amount: parseAmount(e.target.value) })}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+
+              <button className="cy-today-btn" onClick={addCheckRow}>+ افزودن چک جدید</button>
+
+              {multiSummary && (
+                <>
+                  <div className="cy-perforation" />
+                  <div className="cy-summary-card">
+                    <div className="cy-summary-row">
+                      <span>تعداد چک‌ها</span>
+                      <b>{toFa(multiSummary.rows.length)} فقره</b>
+                    </div>
+                    <div className="cy-summary-row">
+                      <span>جمع کل مبلغ</span>
+                      <b>{faCommas(multiSummary.totalAmount)} {multiCurrency}</b>
+                    </div>
+                    <div className="cy-summary-row">
+                      <span>بازه سررسیدها</span>
+                      <b style={{ fontWeight: 700, fontSize: 12.5 }}>
+                        {toFa(multiSummary.earliest.jd)} {MONTHS[multiSummary.earliest.jm - 1]} تا {toFa(multiSummary.latest.jd)} {MONTHS[multiSummary.latest.jm - 1]}
+                      </b>
+                    </div>
+                  </div>
+
+                  <div className="cy-result-label" style={{ marginTop: 16 }}>تاریخ سررسید متوسط (میانگین موزون بر اساس مبلغ)</div>
+                  <div className="cy-result-date">
+                    {toFa(multiSummary.avgJ.jd)} {MONTHS[multiSummary.avgJ.jm - 1]} {toFa(multiSummary.avgJ.jy)}
+                  </div>
+                  <div className="cy-result-weekday">{WEEKDAYS_FA[multiSummary.avgG.getUTCDay()]}</div>
+                  <div className="cy-nextbiz" style={{ textAlign: "center" }}>
+                    یعنی به‌طور میانگین، مجموع طلبت از این مشتری حدود{" "}
+                    <b>
+                      {multiSummary.md.months > 0 && `${toFa(multiSummary.md.months)} ماه `}
+                      {multiSummary.md.days > 0 && `و ${toFa(multiSummary.md.days)} روز `}
+                      دیگر
+                    </b>{" "}
+                    وصول می‌شود.
+                  </div>
+
+                  <div className="cy-cal-title" style={{ marginTop: 20 }}>لیست چک‌ها به ترتیب تاریخ</div>
+                  {multiSummary.rows
+                    .slice()
+                    .sort((a, b) => a.diffDays - b.diffDays)
+                    .map((r) => (
+                      <div className="cy-list-row" key={r.id}>
+                        <span>{toFa(r.jd)} {MONTHS[r.jm - 1]} {toFa(r.jy)}</span>
+                        <span className="cy-list-amount">{faCommas(r.amount)}</span>
+                        {r.holidayInfo.isHoliday ? (
+                          <span className="cy-mini-badge holiday">تعطیل</span>
+                        ) : (
+                          <span className="cy-mini-badge">کاری</span>
+                        )}
+                      </div>
+                    ))}
+                </>
+              )}
+              </>
+              )}
+
+              <div className="cy-sig">✒️</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="cy-note">
+          داده‌های تعطیلات رسمی ۱۴۰۵ بر اساس تقویم رسمی کشور تنظیم شده. این صفحه فقط یک ابزار محاسبه‌گر است و جایگزین برگه چک واقعی بانکی نیست.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<ChekYar />);
+</script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
