@@ -598,6 +598,23 @@ function ChekYar() {
         }
         .cy-list-amount { color: var(--ink-soft); font-weight:700; margin-inline-end: auto; margin-inline-start: 8px; }
 
+        .cy-days-shortcut {
+          display:flex; align-items:center; gap:8px; margin-bottom:10px;
+          background: var(--paper-deep); border-radius: 8px; padding: 7px 10px;
+        }
+        .cy-days-shortcut span { font-size: 11.5px; font-weight:700; color: var(--ink-soft); white-space:nowrap; }
+        .cy-days-input {
+          width: 60px; text-align:center; border: none; border-bottom: 2px dotted var(--brass);
+          background: transparent; font-size: 14px; font-weight:800; color: var(--ink); padding: 3px 2px;
+        }
+        .cy-days-input:focus { outline:none; border-bottom-color: var(--ink); }
+        .cy-days-hint { opacity: .7; }
+
+        .cy-words-box-sm {
+          margin-top: 8px; background: var(--paper-deep); border-radius: 8px; padding: 9px 11px;
+          font-size: 12.5px; font-weight:700; color: var(--ink); line-height: 1.8; text-align:center;
+        }
+
         .cy-sig { position:absolute; bottom:10px; left:16px; opacity:.35; }
       `}</style>
 
@@ -793,8 +810,11 @@ function ChekYar() {
               <div style={{ marginTop: 14 }}>
                 {checks.map((c, idx) => {
                   const len = jalaaliMonthLength(c.jy, c.jm);
-                  const g = jalaliToGregorian(c.jy, c.jm, Math.min(c.jd, len));
+                  const clampedJd = Math.min(c.jd, len);
+                  const g = jalaliToGregorian(c.jy, c.jm, clampedJd);
                   const h = checkHoliday(c.jy, c.jm, c.jd, g.getUTCDay());
+                  const diffDays = Math.round((g - todayUTC) / MS_DAY);
+                  const rowWords = c.amount > 0 ? `${numberToPersianWords(c.amount)} ${multiCurrency}` : "";
                   return (
                     <div className="cy-check-row" key={c.id}>
                       <div className="cy-check-row-header">
@@ -804,6 +824,26 @@ function ChekYar() {
                           <button className="cy-remove-btn" onClick={() => removeCheckRow(c.id)} aria-label="حذف">✕</button>
                         )}
                       </div>
+
+                      <div className="cy-days-shortcut">
+                        <span>تعداد روز از امروز:</span>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          className="cy-days-input"
+                          value={diffDays}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val === "" || val === "-") return;
+                            const days = Number(val);
+                            if (Number.isNaN(days)) return;
+                            const d = addDaysToJalali(todayJ.jy, todayJ.jm, todayJ.jd, days);
+                            updateCheckRow(c.id, { jy: d.jy, jm: d.jm, jd: d.jd });
+                          }}
+                        />
+                        <span className="cy-days-hint">روز</span>
+                      </div>
+
                       <div className="cy-select-row">
                         <select className="cy-select" value={c.jd} onChange={(e) => updateCheckRow(c.id, { jd: Number(e.target.value) })}>
                           {Array.from({ length: len }, (_, i) => i + 1).map((d) => (
@@ -846,6 +886,7 @@ function ChekYar() {
                         value={c.amount ? faCommas(c.amount) : ""}
                         onChange={(e) => updateCheckRow(c.id, { amount: parseAmount(e.target.value) })}
                       />
+                      {rowWords && <div className="cy-words-box-sm">{rowWords}</div>}
                     </div>
                   );
                 })}
