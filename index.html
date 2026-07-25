@@ -245,6 +245,53 @@ function checkHoliday(jy, jm, jd, weekday) {
   return { isHoliday: isFriday || !!reason, isFriday, reason, hasYearData };
 }
 
+/* ============================================================
+   Storage adapter — uses Claude's window.storage when running
+   inside an Artifact, otherwise falls back to plain localStorage
+   for the publicly deployed site. Always safe (try/catch'd).
+   ============================================================ */
+async function storageGet(key) {
+  try {
+    if (typeof window !== "undefined" && window.storage && window.storage.get) {
+      const r = await window.storage.get(key, false);
+      return r ? r.value : null;
+    }
+  } catch (e) {
+    /* key missing or artifact storage unavailable */
+  }
+  try {
+    return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
+  } catch (e) {
+    return null;
+  }
+}
+async function storageSet(key, value) {
+  try {
+    if (typeof window !== "undefined" && window.storage && window.storage.set) {
+      await window.storage.set(key, value, false);
+      return;
+    }
+  } catch (e) {
+    /* fall through to localStorage */
+  }
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(key, value);
+  } catch (e) {
+    /* storage unavailable, ignore */
+  }
+}
+async function storageDelete(key) {
+  try {
+    if (typeof window !== "undefined" && window.storage && window.storage.delete) {
+      await window.storage.delete(key, false);
+      return;
+    }
+  } catch (e) {}
+  try {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(key);
+  } catch (e) {}
+}
+
 function findNextBusinessDay(jy, jm, jd) {
   let g = jalaliToGregorian(jy, jm, jd);
   for (let i = 0; i < 30; i++) {
@@ -281,6 +328,47 @@ function ChekYar() {
   ]);
   const [multiCurrency, setMultiCurrency] = useState("ریال");
   const nextIdRef = React.useRef(2);
+  const loadedOnceRef = React.useRef(false);
+  const [storageNotice, setStorageNotice] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const savedChecks = await storageGet("chekyar_checks_v1");
+        if (savedChecks) {
+          const parsed = JSON.parse(savedChecks);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setChecks(parsed);
+            nextIdRef.current = Math.max(...parsed.map((c) => c.id || 0)) + 1;
+          }
+        }
+        const savedCurrency = await storageGet("chekyar_currency_v1");
+        if (savedCurrency === "ریال" || savedCurrency === "تومان") setMultiCurrency(savedCurrency);
+      } catch (e) {
+        /* no saved data yet, or storage unavailable */
+      } finally {
+        loadedOnceRef.current = true;
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!loadedOnceRef.current) return;
+    storageSet("chekyar_checks_v1", JSON.stringify(checks));
+  }, [checks]);
+
+  useEffect(() => {
+    if (!loadedOnceRef.current) return;
+    storageSet("chekyar_currency_v1", multiCurrency);
+  }, [multiCurrency]);
+
+  const clearLedger = () => {
+    const empty = [{ id: nextIdRef.current++, jy: todayJ.jy, jm: todayJ.jm, jd: todayJ.jd, amount: 0 }];
+    setChecks(empty);
+    storageDelete("chekyar_checks_v1");
+    setStorageNotice("دفتر پاک شد ✓");
+    setTimeout(() => setStorageNotice(""), 1600);
+  };
 
   const addCheckRow = () => {
     setChecks((cs) => [
@@ -370,6 +458,122 @@ function ChekYar() {
       setTimeout(() => setCopied(false), 1500);
     } catch (e) {
       /* clipboard unavailable, ignore */
+    }
+  };
+
+  /* ---- Share helpers (text via Web Share API, image via html2canvas) ---- */
+  const singleResultRef = React.useRef(null);
+  const multiSummaryRef = React.useRef(null);
+  const [shareMsg, setShareMsg] = useState({ single: "", multi: "" });
+
+  const buildSingleShareText = () => {
+    if (!result) return "";
+    const lines = [
+      "📋 چک‌یار — محاسبه سررسید چک",
+      "",
+      `تاریخ صدور: ${toFa(jd)} ${MONTHS[jm - 1]} ${toFa(jy)}`,
+      `مهلت: ${toFa(effectiveDays)} روزه`,
+      `سررسید: ${toFa(result.due.jd)} ${MONTHS[result.due.jm - 1]} ${toFa(result.due.jy)} (${WEEKDAYS_FA[result.weekday]})`,
+      `وضعیت: ${result.holidayInfo.isHoliday ? "⛔️ تعطیل" + (result.holidayInfo.reason ? " — " + result.holidayInfo.reason : " — جمعه") : "✅ روز کاری"}`,
+    ];
+    if (result.holidayInfo.isHoliday && result.nextBiz) {
+      lines.push(`اولین روز کاری بعد: ${toFa(result.nextBiz.jd)} ${MONTHS[result.nextBiz.jm - 1]} ${toFa(result.nextBiz.jy)}`);
+    }
+    if (fullPhrase) {
+      lines.push("", `مبلغ: ${faCommas(amount)} ${currency}`, `به‌حروف: ${fullPhrase}`);
+    }
+    return lines.join("\n");
+  };
+
+  const buildMultiShareText = () => {
+    if (!multiSummary) return "";
+    const lines = [
+      "📋 دفتر چک‌های مشتری — چک‌یار",
+      "",
+      `تعداد چک: ${toFa(multiSummary.rows.length)} فقره`,
+      `جمع کل مبلغ: ${faCommas(multiSummary.totalAmount)} ${multiCurrency}`,
+      `سررسید متوسط (موزون): ${toFa(multiSummary.avgJ.jd)} ${MONTHS[multiSummary.avgJ.jm - 1]} ${toFa(multiSummary.avgJ.jy)}`,
+      `(حدود ${multiSummary.md.months > 0 ? toFa(multiSummary.md.months) + " ماه " : ""}${multiSummary.md.days > 0 ? "و " + toFa(multiSummary.md.days) + " روز " : ""}دیگر)`,
+      "",
+      "جزئیات چک‌ها:",
+    ];
+    multiSummary.rows
+      .slice()
+      .sort((a, b) => a.diffDays - b.diffDays)
+      .forEach((r, i) => {
+        lines.push(
+          `${toFa(i + 1)}) ${toFa(r.jd)} ${MONTHS[r.jm - 1]} ${toFa(r.jy)} — ${faCommas(r.amount)} ${multiCurrency}${r.holidayInfo.isHoliday ? " — تعطیل" : ""}`
+        );
+      });
+    return lines.join("\n");
+  };
+
+  const shareText = async (text, key) => {
+    if (!text) return;
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "چک‌یار", text });
+        return;
+      }
+      throw new Error("no share api");
+    } catch (e) {
+      try {
+        await navigator.clipboard.writeText(text);
+        setShareMsg((m) => ({ ...m, [key]: "کپی شد ✓" }));
+        setTimeout(() => setShareMsg((m) => ({ ...m, [key]: "" })), 1600);
+      } catch (e2) {
+        /* ignore */
+      }
+    }
+  };
+
+  const loadHtml2Canvas = () =>
+    new Promise((resolve, reject) => {
+      if (window.html2canvas) return resolve(window.html2canvas);
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+      s.onload = () => resolve(window.html2canvas);
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+
+  const shareImage = async (ref, filename, key) => {
+    if (!ref.current) return;
+    try {
+      setShareMsg((m) => ({ ...m, [key]: "در حال ساخت عکس…" }));
+      const html2canvas = await loadHtml2Canvas();
+      if (document.fonts && document.fonts.ready) await document.fonts.ready;
+      const canvas = await html2canvas(ref.current, {
+        backgroundColor: "#F3EEDC",
+        scale: 2,
+        useCORS: true,
+      });
+      canvas.toBlob(async (blob) => {
+        if (!blob) return;
+        const file = new File([blob], filename, { type: "image/png" });
+        try {
+          if (navigator.canShare && navigator.canShare({ files: [file] })) {
+            await navigator.share({ files: [file], title: "چک‌یار" });
+            setShareMsg((m) => ({ ...m, [key]: "" }));
+            return;
+          }
+          throw new Error("no file share");
+        } catch (e) {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          setShareMsg((m) => ({ ...m, [key]: "ذخیره شد ✓" }));
+          setTimeout(() => setShareMsg((m) => ({ ...m, [key]: "" })), 1600);
+        }
+      }, "image/png");
+    } catch (e) {
+      setShareMsg((m) => ({ ...m, [key]: "خطا در ساخت عکس" }));
+      setTimeout(() => setShareMsg((m) => ({ ...m, [key]: "" })), 1800);
     }
   };
 
@@ -616,6 +820,23 @@ function ChekYar() {
         }
 
         .cy-sig { position:absolute; bottom:10px; left:16px; opacity:.35; }
+
+        .cy-share-capture { padding: 2px; }
+        .cy-share-row { display:flex; gap:8px; margin-top: 14px; }
+        .cy-share-btn {
+          flex:1; padding: 10px 6px; border-radius: 10px; border: 1.5px solid var(--ink);
+          background: var(--ink); color: var(--paper); font-weight:800; font-size:12.5px; cursor:pointer;
+        }
+        .cy-share-btn:active { opacity: .85; }
+        .cy-share-status { text-align:center; font-size:11.5px; font-weight:700; color: var(--stamp-green); margin-top:7px; }
+
+        .cy-autosave-note {
+          margin-top:10px; font-size: 10.5px; color: #8A8265; line-height:1.9; text-align:center;
+        }
+        .cy-clear-link {
+          border:none; background:none; color: var(--stamp-red); font-weight:800; font-size:10.5px;
+          text-decoration: underline; cursor:pointer; padding:0;
+        }
       `}</style>
 
       <div className="cy-shell">
@@ -713,30 +934,46 @@ function ChekYar() {
               {result && (
                 <>
                   <div className="cy-perforation" />
-                  <div className="cy-result-label">تاریخ سررسید ({toFa(effectiveDays)} روز بعد از صدور)</div>
-                  <div className="cy-result-date">
-                    {toFa(result.due.jd)} {MONTHS[result.due.jm - 1]} {toFa(result.due.jy)}
-                  </div>
-                  <div className="cy-result-weekday">{WEEKDAYS_FA[result.weekday]}</div>
-                  <div className="cy-result-greg">
-                    میلادی: {result.due.greg.getUTCFullYear()}/{String(result.due.greg.getUTCMonth() + 1).padStart(2, "0")}/{String(result.due.greg.getUTCDate()).padStart(2, "0")}
+                  <div ref={singleResultRef} className="cy-share-capture">
+                    <div className="cy-result-label">تاریخ سررسید ({toFa(effectiveDays)} روز بعد از صدور)</div>
+                    <div className="cy-result-date">
+                      {toFa(result.due.jd)} {MONTHS[result.due.jm - 1]} {toFa(result.due.jy)}
+                    </div>
+                    <div className="cy-result-weekday">{WEEKDAYS_FA[result.weekday]}</div>
+                    <div className="cy-result-greg">
+                      میلادی: {result.due.greg.getUTCFullYear()}/{String(result.due.greg.getUTCMonth() + 1).padStart(2, "0")}/{String(result.due.greg.getUTCDate()).padStart(2, "0")}
+                    </div>
+
+                    <div className="cy-stamp-wrap">
+                      <div className={"cy-stamp" + (result.holidayInfo.isHoliday ? " holiday" : "")}>
+                        {result.holidayInfo.isHoliday ? "◆ تعطیل ◆" : "◆ روز کاری ◆"}
+                      </div>
+                    </div>
+                    {result.holidayInfo.isHoliday && (
+                      <div className="cy-reason">{result.holidayInfo.reason || "جمعه، تعطیل هفتگی"}</div>
+                    )}
+                    {result.holidayInfo.isHoliday && result.nextBiz && (
+                      <div className="cy-nextbiz">
+                        چون سررسید با تعطیلی مصادف است، بانک‌ها معمولاً چک را در نخستین <b>روز کاری بعد</b> پردازش می‌کنند:
+                        <br />
+                        <b>{toFa(result.nextBiz.jd)} {MONTHS[result.nextBiz.jm - 1]} {toFa(result.nextBiz.jy)} ({WEEKDAYS_FA[result.nextBiz.greg.getUTCDay()]})</b>
+                      </div>
+                    )}
+                    {fullPhrase && (
+                      <div className="cy-nextbiz" style={{ marginTop: 8 }}>
+                        مبلغ: <b>{faCommas(amount)} {currency}</b>
+                        <br />
+                        {fullPhrase}
+                      </div>
+                    )}
                   </div>
 
-                  <div className="cy-stamp-wrap">
-                    <div className={"cy-stamp" + (result.holidayInfo.isHoliday ? " holiday" : "")}>
-                      {result.holidayInfo.isHoliday ? "◆ تعطیل ◆" : "◆ روز کاری ◆"}
-                    </div>
+                  <div className="cy-share-row">
+                    <button className="cy-share-btn" onClick={() => shareText(buildSingleShareText(), "single")}>📤 ارسال متن</button>
+                    <button className="cy-share-btn" onClick={() => shareImage(singleResultRef, "chekyar-natije.png", "single")}>🖼️ ارسال عکس</button>
                   </div>
-                  {result.holidayInfo.isHoliday && (
-                    <div className="cy-reason">{result.holidayInfo.reason || "جمعه، تعطیل هفتگی"}</div>
-                  )}
-                  {result.holidayInfo.isHoliday && result.nextBiz && (
-                    <div className="cy-nextbiz">
-                      چون سررسید با تعطیلی مصادف است، بانک‌ها معمولاً چک را در نخستین <b>روز کاری بعد</b> پردازش می‌کنند:
-                      <br />
-                      <b>{toFa(result.nextBiz.jd)} {MONTHS[result.nextBiz.jm - 1]} {toFa(result.nextBiz.jy)} ({WEEKDAYS_FA[result.nextBiz.greg.getUTCDay()]})</b>
-                    </div>
-                  )}
+                  {shareMsg.single && <div className="cy-share-status">{shareMsg.single}</div>}
+
                   {!result.holidayInfo.hasYearData && (
                     <div className="cy-warn">
                       ⚠️ تعطیلات قمری سال {toFa(result.due.jy)} هنوز در پایگاه‌داده ثبت نشده. جمعه‌ها و تعطیلات ثابت لحاظ شده؛ برای اطمینان کامل با اپ بانکتان چک کنید.
@@ -893,57 +1130,71 @@ function ChekYar() {
               </div>
 
               <button className="cy-today-btn" onClick={addCheckRow}>+ افزودن چک جدید</button>
+              <div className="cy-autosave-note">
+                💾 چک‌های این دفتر خودکار روی همین مرورگر ذخیره می‌شوند و با رفرش صفحه پاک نمی‌شوند.
+                {" "}
+                <button className="cy-clear-link" onClick={clearLedger}>پاک کردن کل دفتر</button>
+              </div>
+              {storageNotice && <div className="cy-share-status">{storageNotice}</div>}
 
               {multiSummary && (
                 <>
                   <div className="cy-perforation" />
-                  <div className="cy-summary-card">
-                    <div className="cy-summary-row">
-                      <span>تعداد چک‌ها</span>
-                      <b>{toFa(multiSummary.rows.length)} فقره</b>
-                    </div>
-                    <div className="cy-summary-row">
-                      <span>جمع کل مبلغ</span>
-                      <b>{faCommas(multiSummary.totalAmount)} {multiCurrency}</b>
-                    </div>
-                    <div className="cy-summary-row">
-                      <span>بازه سررسیدها</span>
-                      <b style={{ fontWeight: 700, fontSize: 12.5 }}>
-                        {toFa(multiSummary.earliest.jd)} {MONTHS[multiSummary.earliest.jm - 1]} تا {toFa(multiSummary.latest.jd)} {MONTHS[multiSummary.latest.jm - 1]}
-                      </b>
-                    </div>
-                  </div>
-
-                  <div className="cy-result-label" style={{ marginTop: 16 }}>تاریخ سررسید متوسط (میانگین موزون بر اساس مبلغ)</div>
-                  <div className="cy-result-date">
-                    {toFa(multiSummary.avgJ.jd)} {MONTHS[multiSummary.avgJ.jm - 1]} {toFa(multiSummary.avgJ.jy)}
-                  </div>
-                  <div className="cy-result-weekday">{WEEKDAYS_FA[multiSummary.avgG.getUTCDay()]}</div>
-                  <div className="cy-nextbiz" style={{ textAlign: "center" }}>
-                    یعنی به‌طور میانگین، مجموع طلبت از این مشتری حدود{" "}
-                    <b>
-                      {multiSummary.md.months > 0 && `${toFa(multiSummary.md.months)} ماه `}
-                      {multiSummary.md.days > 0 && `و ${toFa(multiSummary.md.days)} روز `}
-                      دیگر
-                    </b>{" "}
-                    وصول می‌شود.
-                  </div>
-
-                  <div className="cy-cal-title" style={{ marginTop: 20 }}>لیست چک‌ها به ترتیب تاریخ</div>
-                  {multiSummary.rows
-                    .slice()
-                    .sort((a, b) => a.diffDays - b.diffDays)
-                    .map((r) => (
-                      <div className="cy-list-row" key={r.id}>
-                        <span>{toFa(r.jd)} {MONTHS[r.jm - 1]} {toFa(r.jy)}</span>
-                        <span className="cy-list-amount">{faCommas(r.amount)}</span>
-                        {r.holidayInfo.isHoliday ? (
-                          <span className="cy-mini-badge holiday">تعطیل</span>
-                        ) : (
-                          <span className="cy-mini-badge">کاری</span>
-                        )}
+                  <div ref={multiSummaryRef} className="cy-share-capture">
+                    <div className="cy-summary-card">
+                      <div className="cy-summary-row">
+                        <span>تعداد چک‌ها</span>
+                        <b>{toFa(multiSummary.rows.length)} فقره</b>
                       </div>
-                    ))}
+                      <div className="cy-summary-row">
+                        <span>جمع کل مبلغ</span>
+                        <b>{faCommas(multiSummary.totalAmount)} {multiCurrency}</b>
+                      </div>
+                      <div className="cy-summary-row">
+                        <span>بازه سررسیدها</span>
+                        <b style={{ fontWeight: 700, fontSize: 12.5 }}>
+                          {toFa(multiSummary.earliest.jd)} {MONTHS[multiSummary.earliest.jm - 1]} تا {toFa(multiSummary.latest.jd)} {MONTHS[multiSummary.latest.jm - 1]}
+                        </b>
+                      </div>
+                    </div>
+
+                    <div className="cy-result-label" style={{ marginTop: 16 }}>تاریخ سررسید متوسط (میانگین موزون بر اساس مبلغ)</div>
+                    <div className="cy-result-date">
+                      {toFa(multiSummary.avgJ.jd)} {MONTHS[multiSummary.avgJ.jm - 1]} {toFa(multiSummary.avgJ.jy)}
+                    </div>
+                    <div className="cy-result-weekday">{WEEKDAYS_FA[multiSummary.avgG.getUTCDay()]}</div>
+                    <div className="cy-nextbiz" style={{ textAlign: "center" }}>
+                      یعنی به‌طور میانگین، مجموع طلبت از این مشتری حدود{" "}
+                      <b>
+                        {multiSummary.md.months > 0 && `${toFa(multiSummary.md.months)} ماه `}
+                        {multiSummary.md.days > 0 && `و ${toFa(multiSummary.md.days)} روز `}
+                        دیگر
+                      </b>{" "}
+                      وصول می‌شود.
+                    </div>
+
+                    <div className="cy-cal-title" style={{ marginTop: 20 }}>لیست چک‌ها به ترتیب تاریخ</div>
+                    {multiSummary.rows
+                      .slice()
+                      .sort((a, b) => a.diffDays - b.diffDays)
+                      .map((r) => (
+                        <div className="cy-list-row" key={r.id}>
+                          <span>{toFa(r.jd)} {MONTHS[r.jm - 1]} {toFa(r.jy)}</span>
+                          <span className="cy-list-amount">{faCommas(r.amount)}</span>
+                          {r.holidayInfo.isHoliday ? (
+                            <span className="cy-mini-badge holiday">تعطیل</span>
+                          ) : (
+                            <span className="cy-mini-badge">کاری</span>
+                          )}
+                        </div>
+                      ))}
+                  </div>
+
+                  <div className="cy-share-row">
+                    <button className="cy-share-btn" onClick={() => shareText(buildMultiShareText(), "multi")}>📤 ارسال متن</button>
+                    <button className="cy-share-btn" onClick={() => shareImage(multiSummaryRef, "chekyar-daftar.png", "multi")}>🖼️ ارسال عکس</button>
+                  </div>
+                  {shareMsg.multi && <div className="cy-share-status">{shareMsg.multi}</div>}
                 </>
               )}
               </>
