@@ -577,6 +577,94 @@ function ChekYar() {
     }
   };
 
+  /* ---- Calendar export (.ics — works with Google/Samsung/Apple Calendar) ---- */
+  const icsEscape = (str) =>
+    String(str).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+
+  const icsDate = (d) => {
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(d.getUTCDate()).padStart(2, "0");
+    return `${y}${m}${day}`;
+  };
+  const icsDateTime = (d) => {
+    const y = d.getUTCFullYear();
+    const mo = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const da = String(d.getUTCDate()).padStart(2, "0");
+    const h = String(d.getUTCHours()).padStart(2, "0");
+    const mi = String(d.getUTCMinutes()).padStart(2, "0");
+    const s = String(d.getUTCSeconds()).padStart(2, "0");
+    return `${y}${mo}${da}T${h}${mi}${s}Z`;
+  };
+
+  const buildICS = (events) => {
+    const dtstamp = icsDateTime(new Date());
+    const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Chekyar//FA", "CALSCALE:GREGORIAN"];
+    events.forEach((ev, i) => {
+      const start = ev.date;
+      const end = new Date(start.getTime() + MS_DAY);
+      lines.push("BEGIN:VEVENT");
+      lines.push(`UID:chekyar-${Date.now()}-${i}@chekyar`);
+      lines.push(`DTSTAMP:${dtstamp}`);
+      lines.push(`DTSTART;VALUE=DATE:${icsDate(start)}`);
+      lines.push(`DTEND;VALUE=DATE:${icsDate(end)}`);
+      lines.push(`SUMMARY:${icsEscape(ev.summary)}`);
+      if (ev.description) lines.push(`DESCRIPTION:${icsEscape(ev.description)}`);
+      lines.push("BEGIN:VALARM");
+      lines.push("ACTION:DISPLAY");
+      lines.push(`DESCRIPTION:${icsEscape("یادآوری سررسید چک")}`);
+      lines.push("TRIGGER:-P1D");
+      lines.push("END:VALARM");
+      lines.push("END:VEVENT");
+    });
+    lines.push("END:VCALENDAR");
+    return lines.join("\r\n") + "\r\n";
+  };
+
+  const downloadICS = (ics, filename) => {
+    const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const addSingleToCalendar = () => {
+    if (!result) return;
+    const summary = `سررسید چک${amount > 0 ? " - " + faCommas(amount) + " " + currency : ""}`;
+    const description = [
+      `صادر شده در ${toFa(jd)} ${MONTHS[jm - 1]} ${toFa(jy)}`,
+      `مهلت: ${toFa(effectiveDays)} روزه`,
+      `وضعیت سررسید: ${result.holidayInfo.isHoliday ? "تعطیل (" + (result.holidayInfo.reason || "جمعه") + ")" : "روز کاری"}`,
+      "ساخته‌شده با چک‌یار",
+    ].join("\n");
+    downloadICS(buildICS([{ date: result.due.greg, summary, description }]), "chekyar-check.ics");
+  };
+
+  const addRowToCalendar = (r) => {
+    const summary = `سررسید چک - ${faCommas(r.amount)} ${multiCurrency}`;
+    const description = [
+      `تاریخ: ${toFa(r.jd)} ${MONTHS[r.jm - 1]} ${toFa(r.jy)}`,
+      r.holidayInfo.isHoliday ? "توجه: این روز تعطیل است" : "روز کاری",
+      "از دفتر چک‌یار",
+    ].join("\n");
+    downloadICS(buildICS([{ date: r.greg, summary, description }]), "chekyar-check.ics");
+  };
+
+  const addAllToCalendar = () => {
+    if (!multiSummary) return;
+    const events = multiSummary.rows.map((r) => ({
+      date: r.greg,
+      summary: `سررسید چک - ${faCommas(r.amount)} ${multiCurrency}`,
+      description: `از دفتر چک‌یار${r.holidayInfo.isHoliday ? "\nتوجه: این روز تعطیل است" : ""}`,
+    }));
+    downloadICS(buildICS(events), "chekyar-daftar-checks.ics");
+  };
+
   return (
     <div dir="rtl" lang="fa" style={{ minHeight: "100vh", background: "var(--desk)" }}>
       <style>{`
@@ -776,9 +864,14 @@ function ChekYar() {
           display:flex; align-items:center; gap:8px; margin-bottom: 9px;
           font-size:12.5px; font-weight:800; color: var(--ink-soft);
         }
+        .cy-row-actions { margin-right: auto; display:flex; align-items:center; gap:6px; }
         .cy-remove-btn {
-          margin-right:auto; border:none; background: var(--stamp-red-bg); color: var(--stamp-red);
+          border:none; background: var(--stamp-red-bg); color: var(--stamp-red);
           width:22px; height:22px; border-radius:50%; font-weight:800; font-size:11px; cursor:pointer; line-height:1;
+        }
+        .cy-row-cal-btn {
+          border:none; background: var(--paper-deep); color: var(--ink);
+          width:22px; height:22px; border-radius:50%; font-size:11px; cursor:pointer; line-height:1;
         }
         .cy-mini-badge {
           font-size: 10.5px; font-weight:700; padding: 2px 8px; border-radius: 999px;
@@ -822,10 +915,10 @@ function ChekYar() {
         .cy-sig { position:absolute; bottom:10px; left:16px; opacity:.35; }
 
         .cy-share-capture { padding: 2px; }
-        .cy-share-row { display:flex; gap:8px; margin-top: 14px; }
+        .cy-share-row { display:flex; gap:8px; margin-top: 14px; flex-wrap: wrap; }
         .cy-share-btn {
-          flex:1; padding: 10px 6px; border-radius: 10px; border: 1.5px solid var(--ink);
-          background: var(--ink); color: var(--paper); font-weight:800; font-size:12.5px; cursor:pointer;
+          flex:1; min-width: 92px; padding: 10px 6px; border-radius: 10px; border: 1.5px solid var(--ink);
+          background: var(--ink); color: var(--paper); font-weight:800; font-size:12px; cursor:pointer;
         }
         .cy-share-btn:active { opacity: .85; }
         .cy-share-status { text-align:center; font-size:11.5px; font-weight:700; color: var(--stamp-green); margin-top:7px; }
@@ -971,6 +1064,7 @@ function ChekYar() {
                   <div className="cy-share-row">
                     <button className="cy-share-btn" onClick={() => shareText(buildSingleShareText(), "single")}>📤 ارسال متن</button>
                     <button className="cy-share-btn" onClick={() => shareImage(singleResultRef, "chekyar-natije.png", "single")}>🖼️ ارسال عکس</button>
+                    <button className="cy-share-btn cy-cal-btn" onClick={addSingleToCalendar}>🔔 تقویم</button>
                   </div>
                   {shareMsg.single && <div className="cy-share-status">{shareMsg.single}</div>}
 
@@ -1057,9 +1151,21 @@ function ChekYar() {
                       <div className="cy-check-row-header">
                         <span>چک {toFa(idx + 1)}</span>
                         {h.isHoliday && <span className="cy-mini-badge holiday">{h.reason ? h.reason : "جمعه"}</span>}
-                        {checks.length > 1 && (
-                          <button className="cy-remove-btn" onClick={() => removeCheckRow(c.id)} aria-label="حذف">✕</button>
-                        )}
+                        <div className="cy-row-actions">
+                          {c.amount > 0 && (
+                            <button
+                              className="cy-row-cal-btn"
+                              onClick={() => addRowToCalendar({ amount: c.amount, jy: c.jy, jm: c.jm, jd: c.jd, greg: g, holidayInfo: h })}
+                              aria-label="افزودن به تقویم"
+                              title="افزودن به تقویم گوشی"
+                            >
+                              🔔
+                            </button>
+                          )}
+                          {checks.length > 1 && (
+                            <button className="cy-remove-btn" onClick={() => removeCheckRow(c.id)} aria-label="حذف">✕</button>
+                          )}
+                        </div>
                       </div>
 
                       <div className="cy-days-shortcut">
@@ -1193,6 +1299,7 @@ function ChekYar() {
                   <div className="cy-share-row">
                     <button className="cy-share-btn" onClick={() => shareText(buildMultiShareText(), "multi")}>📤 ارسال متن</button>
                     <button className="cy-share-btn" onClick={() => shareImage(multiSummaryRef, "chekyar-daftar.png", "multi")}>🖼️ ارسال عکس</button>
+                    <button className="cy-share-btn cy-cal-btn" onClick={addAllToCalendar}>🔔 همه به تقویم</button>
                   </div>
                   {shareMsg.multi && <div className="cy-share-status">{shareMsg.multi}</div>}
                 </>
