@@ -9,14 +9,93 @@
 <meta name="theme-color" content="#16342E">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 </head>
 <body style="margin:0;">
-<div id="root"></div>
+<div id="root">
+  <div id="cy-loading" style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#DDD6C1;font-family:Tahoma,sans-serif;color:#16342E;text-align:center;padding:20px;direction:rtl;">
+    <div>
+      <div style="font-size:15px;font-weight:700;">📋 در حال بارگذاری چک‌یار…</div>
+      <div id="cy-loading-sub" style="font-size:12px;margin-top:10px;opacity:.7;">در حال اتصال…</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var CDNS = {
+    react: [
+      "https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js",
+      "https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js",
+      "https://unpkg.com/react@18.2.0/umd/react.production.min.js"
+    ],
+    reactDom: [
+      "https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js",
+      "https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js",
+      "https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"
+    ],
+    babel: [
+      "https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js",
+      "https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.5/babel.min.js",
+      "https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"
+    ]
+  };
+
+  function loadOne(urls, idx, cb) {
+    if (idx >= urls.length) { cb(false); return; }
+    var s = document.createElement("script");
+    s.src = urls[idx];
+    s.onload = function () { cb(true); };
+    s.onerror = function () { loadOne(urls, idx + 1, cb); };
+    document.head.appendChild(s);
+  }
+
+  function setSub(msg) {
+    var el = document.getElementById("cy-loading-sub");
+    if (el) el.textContent = msg;
+  }
+
+  function showError(msg) {
+    clearTimeout(timeoutId);
+    var root = document.getElementById("root");
+    if (!root) return;
+    var safe = String(msg).replace(/</g, "&lt;");
+    root.innerHTML =
+      '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#F6E4E1;padding:24px;direction:rtl;font-family:Tahoma,sans-serif;">' +
+      '<div style="max-width:340px;text-align:center;">' +
+      '<div style="font-size:32px;">⚠️</div>' +
+      '<div style="font-size:15px;font-weight:700;color:#A23B3B;margin-top:10px;">چک‌یار بالا نیامد</div>' +
+      '<div style="font-size:12.5px;color:#5b2a2a;margin-top:10px;white-space:pre-line;line-height:1.9;">' + safe + '</div>' +
+      '<div style="font-size:11px;color:#8a5252;margin-top:14px;">از همین پیام اسکرین‌شات بگیر و برای پشتیبانی بفرست.</div>' +
+      "</div></div>";
+  }
+  window.__cyShowError = showError;
+
+  var timeoutId = setTimeout(function () {
+    showError("اتصال به سرورهای لازم برای اجرای برنامه خیلی طول کشید.\nاحتمالاً فیلترشکن یا اینترنتت مشکل داره — یه بار روشن/خاموشش کن یا شبکه رو (وای‌فای/دیتا) عوض کن و صفحه رو رفرش کن.");
+  }, 12000);
+
+  window.addEventListener("error", function (e) {
+    showError("خطای فنی رخ داد:\n" + (e && e.message ? e.message : "نامشخص"));
+  });
+
+  setSub("در حال اتصال به کتابخانه React…");
+  loadOne(CDNS.react, 0, function (ok1) {
+    if (!ok1) { showError("بارگذاری کتابخانه React ناموفق بود.\nاحتمالاً اینترنت یا فیلترشکن مشکل داره."); return; }
+    setSub("در حال اتصال به ReactDOM…");
+    loadOne(CDNS.reactDom, 0, function (ok2) {
+      if (!ok2) { showError("بارگذاری ReactDOM ناموفق بود.\nاحتمالاً اینترنت یا فیلترشکن مشکل داره."); return; }
+      setSub("در حال آماده‌سازی برنامه…");
+      loadOne(CDNS.babel, 0, function (ok3) {
+        if (!ok3) { showError("بارگذاری Babel ناموفق بود.\nاحتمالاً اینترنت یا فیلترشکن مشکل داره."); return; }
+        clearTimeout(timeoutId);
+      });
+    });
+  });
+})();
+</script>
+
 <script type="text/babel" data-presets="react">
-const { useState, useMemo } = React;
+const { useState, useMemo, useEffect } = React;
 
 /* ============================================================
    Jalali <-> Gregorian conversion (validated against 20,000
@@ -1320,7 +1399,13 @@ function ChekYar() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<ChekYar />);
+try {
+  ReactDOM.createRoot(document.getElementById('root')).render(<ChekYar />);
+  var loadingEl = document.getElementById('cy-loading');
+  if (loadingEl && loadingEl.parentNode) { /* React already replaced #root content */ }
+} catch (e) {
+  if (window.__cyShowError) window.__cyShowError('خطا در اجرای برنامه:\n' + (e && e.message ? e.message : e));
+}
 </script>
 <script>
   if ('serviceWorker' in navigator) {
